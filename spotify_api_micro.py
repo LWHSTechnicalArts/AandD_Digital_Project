@@ -260,4 +260,4 @@ while True:
         #print(json.dumps(currently_playing))
         print_currently_playing(currently_playing)
 
-    time.sleep(2)
+    time.sleep(10)
