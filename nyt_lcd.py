@@ -1,75 +1,77 @@
-#works with circuitPython 9
+# NYT most-popular headlines on the 3.5" TFT FeatherWing — CircuitPython 10
+# /lib needs: adafruit_display_text, adafruit_hx8357,
+#             adafruit_connection_manager, adafruit_requests
+# created in collaboration with Claude
 
-import ipaddress
-import ssl
-import wifi
-import socketpool
-import adafruit_requests
-import time
-import json
-import board
+import os
 import random
+import time
+
+import board
+import displayio
+import fourwire
 import terminalio
-from adafruit_display_text import bitmap_label
+import wifi
+from adafruit_display_text import label
 
-red = 0xFF0000
-purple = 0xFF00FF
+import adafruit_connection_manager
+import adafruit_hx8357
+import adafruit_requests
 
-# URLs to fetch from
-API_KEY = "YOUR KEY HERE" #get a key here https://developer.nytimes.com/
-JSON_DATA_URL = f'https://api.nytimes.com/svc/mostpopular/v2/viewed/1.json?api-key={API_KEY}' 
+SSID = os.getenv("WIFI_SSID_1")
+PASSWORD = os.getenv("WIFI_PASSWORD_1")
+URL = (
+    "https://api.nytimes.com/svc/mostpopular/v2/viewed/1.json"
+    f"?api-key={os.getenv('NYT_API_KEY')}"
+)
 
-# Get wifi details and more from a secrets.py file
-try:
-    from secrets import secrets
-except ImportError:
-    print("WiFi secrets are kept in secrets.py, please add them there!")
-    raise
+# NYT free tier: 500 calls/day. 86400 sec / 500 = 172.8, so 180 is the floor.
+# 300 gives 288 calls/day — room for reboots and retries.
+SLEEP_SECONDS = 300
 
-wifi.radio.connect(secrets["ssid"], secrets["password"])
-print("Connected to %s!"%secrets["ssid"])
-print("My IP address is", wifi.radio.ipv4_address)
+displayio.release_displays()
+display = adafruit_hx8357.HX8357(
+    fourwire.FourWire(board.SPI(), command=board.D10, chip_select=board.D9),
+    width=480,
+    height=320,
+)
 
-pool = socketpool.SocketPool(wifi.radio)
-requests = adafruit_requests.Session(pool, ssl.create_default_context())
+text = label.Label(
+    terminalio.FONT, text="connecting", color=0xFF00FF, scale=3,
+    background_color=0x000000, line_spacing=1.3, x=15, y=50,
+)
+display.root_group = text
 
 
-def wrap_nicely(string, max_chars):
-    """A helper that will return the string with word-break wrapping.
-    :param str string: The text to be wrapped.
-    :param int max_chars: The maximum number of characters on a line before wrapping.
-    """
-    string = string.replace('\n', '').replace('\r', '') # strip confusing newlines
-    words = string.split(' ')
-    the_lines = []
-    the_line = ""
-    for w in words:
-        if len(the_line+' '+w) <= max_chars:
-            the_line += ' '+w
+def wrap(headline, max_chars=26):
+    """Break a headline onto lines at spaces. 26 chars fits 480px at scale 3."""
+    lines, line = [], ""
+    for word in headline.split():
+        if len((line + " " + word).strip()) <= max_chars:
+            line = (line + " " + word).strip()
         else:
-            the_lines.append(the_line)
-            the_line = w
-    if the_line:
-        the_lines.append(the_line)
-    the_lines[0] = the_lines[0][1:]
-    the_newline = ""
-    for w in the_lines:
-        the_newline += '\n'+w
-    return the_newline
+            lines.append(line)
+            line = word
+    lines.append(line)
+    return "\n".join(lines)
+
+
+wifi.radio.connect(SSID, PASSWORD)
+pool = adafruit_connection_manager.get_radio_socketpool(wifi.radio)
+ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
+requests = adafruit_requests.Session(pool, ssl_context)
 
 while True:
-    response = requests.get(JSON_DATA_URL)
-    data = response.json()
-    random_nyt = random.randint(0,6)
-    headline = data["results"][random_nyt]["title"]
-    print(headline)
-
-    text = wrap_nicely(headline,20)
-    
-    scale = 2
-    text_area = bitmap_label.Label(terminalio.FONT, text=text, scale=scale, color=purple)
-    text_area.x = 0
-    text_area.y = 0
-    board.DISPLAY.root_group = (text_area)
-
-    time.sleep(60)
+    try:
+        if not wifi.radio.connected:  # reconnect after a router blip
+            wifi.radio.connect(SSID, PASSWORD)
+        with requests.get(URL) as response:
+            stories = response.json()["results"]
+        headline = random.choice(stories)["title"]  # random pick each time
+        print(headline)
+        text.text = wrap(headline)
+    except Exception as err:
+        # KeyError: results usually means HTTP 429 — over the daily quota
+        print("failed:", err)
+        text.text = "offline"
+    time.sleep(SLEEP_SECONDS)
